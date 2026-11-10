@@ -22,8 +22,31 @@
     -webkit-user-select:none;user-select:none;
   }
 
+  /* ---------- FASE 0: BONO (señuelo) ---------- */
+  #bono{
+    position:fixed;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;padding:24px;
+    background:linear-gradient(160deg,#2f6bff 0%,#7a3ff0 100%);
+  }
+  body.activo #bono{display:none}
+  .tarjeta{
+    background:#fff;color:#1b1f2a;border-radius:20px;padding:32px 24px 28px;
+    width:min(100%,380px);text-align:center;box-shadow:0 20px 50px rgba(20,10,60,.35);
+  }
+  .tarjeta .regalo{font-size:56px;line-height:1}
+  .tarjeta h1{font-size:clamp(22px,6.5vw,28px);margin:14px 0 8px;font-weight:800}
+  .tarjeta p{color:#5a6070;font-size:15px;line-height:1.4}
+  .tarjeta button{
+    margin-top:22px;width:100%;border:0;border-radius:14px;padding:16px;
+    font:inherit;font-size:18px;font-weight:800;color:#fff;background:#18a957;
+    box-shadow:0 6px 0 #11823f;cursor:pointer;-webkit-tap-highlight-color:transparent;
+    animation:latido 1.4s ease-in-out infinite;
+  }
+  .tarjeta button:active{box-shadow:0 2px 0 #11823f}
+  @keyframes latido{0%,100%{transform:scale(1)}50%{transform:scale(1.03)}}
+
   /* ---------- FASE 1: ALARMA ---------- */
-  #alarma{position:fixed;inset:0;transition:opacity 1.2s ease}
+  #alarma{position:fixed;inset:0;display:none;transition:opacity 1.2s ease}
+  body.activo #alarma{display:block}
   #alarma.fuera{opacity:0;pointer-events:none}
   .vineta{
     position:absolute;inset:0;pointer-events:none;
@@ -89,11 +112,20 @@
   #mensaje p{margin-top:30px;font-size:clamp(14px,3.8vw,17px);color:#5b6670}
 
   @media (prefers-reduced-motion: reduce){
-    body.sacudir #alarma,.centro .icono{animation:none}
+    body.sacudir #alarma,.centro .icono,.tarjeta button{animation:none}
   }
 </style>
 </head>
 <body>
+
+<div id="bono">
+  <div class="tarjeta">
+    <div class="regalo">🎁</div>
+    <h1>Bono de participación</h1>
+    <p>Toca el botón para reclamar tu bono.</p>
+    <button id="reclamar" type="button">Reclamar bono</button>
+  </div>
+</div>
 
 <div id="alarma" aria-hidden="true">
   <div class="vineta"></div>
@@ -136,17 +168,89 @@
     ["MICRÓFONO", "Grabación de audio en curso"]
   ];
 
-  var calmado = false;
+  var iniciado = false, calmado = false;
   var alarma = document.getElementById("alarma");
   var capa = document.getElementById("popups");
   var contador = document.getElementById("contador");
   var progreso = document.getElementById("progreso");
-  var inicio = Date.now();
-  var n = 0, amenazas = 0;
+  var iPopup, iContador, iVibra, inicio = 0, n = 0, amenazas = 0;
 
-  document.body.classList.add("sacudir");
+  /* ---------- Sonido (Web Audio, generado en el navegador) ---------- */
+  var ctx = null, master = null, sirena = null, iBeep = null;
 
-  // Ventanas emergentes en posiciones aleatorias
+  function prepararAudio() {
+    // En iPhone, permite que suene aunque el interruptor de silencio esté activo (Safari 16.4+)
+    try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      ctx = new AC();
+      if (ctx.state === "suspended") ctx.resume();
+      // Desbloqueo para iOS: un búfer silencioso dentro del toque
+      var b = ctx.createBuffer(1, 1, 22050), s = ctx.createBufferSource();
+      s.buffer = b; s.connect(ctx.destination); s.start(0);
+      master = ctx.createGain();
+      master.gain.value = 0.35;
+      var comp = ctx.createDynamicsCompressor();
+      master.connect(comp); comp.connect(ctx.destination);
+    } catch (e) { ctx = null; }
+  }
+
+  function beep(freq, dur, vol) {
+    if (!ctx || calmado) return;
+    try {
+      var o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime, v = vol || 0.4;
+      o.type = "square"; o.frequency.value = freq;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(v, t + 0.01);
+      g.gain.setValueAtTime(v, t + dur);
+      g.gain.linearRampToValueAtTime(0, t + dur + 0.02);
+      o.connect(g); g.connect(master);
+      o.start(t); o.stop(t + dur + 0.05);
+    } catch (e) {}
+  }
+
+  function arrancarSirena() {
+    if (!ctx) return;
+    try {
+      // Sirena tipo "whoop": barrido ascendente 650 → 1300 Hz cada 0,5 s
+      sirena = ctx.createOscillator();
+      var g = ctx.createGain(); g.gain.value = 0.45;
+      sirena.type = "sawtooth";
+      sirena.connect(g); g.connect(master);
+      var t = ctx.currentTime;
+      for (var i = 0; i < 24; i++) {
+        sirena.frequency.setValueAtTime(650, t + i * 0.5);
+        sirena.frequency.linearRampToValueAtTime(1300, t + i * 0.5 + 0.5);
+      }
+      sirena.start(t);
+      // Doble pitido de alerta encima de la sirena
+      iBeep = setInterval(function () {
+        beep(1760, 0.08);
+        setTimeout(function () { beep(1760, 0.08); }, 130);
+      }, 900);
+    } catch (e) {}
+  }
+
+  function apagarAudio() {
+    clearInterval(iBeep);
+    if (!ctx) return;
+    try {
+      var t = ctx.currentTime;
+      master.gain.cancelScheduledValues(t);
+      master.gain.setValueAtTime(master.gain.value, t);
+      master.gain.linearRampToValueAtTime(0, t + 0.4);
+      setTimeout(function () {
+        try { if (sirena) sirena.stop(); ctx.close(); } catch (e) {}
+      }, 500);
+    } catch (e) {}
+  }
+
+  function vibrar() {
+    try { if (navigator.vibrate) navigator.vibrate([300, 100, 300, 100, 300, 100, 300]); } catch (e) {}
+  }
+
+  /* ---------- Caos visual ---------- */
   function popup() {
     var m = MENSAJES[n % MENSAJES.length]; n++;
     var el = document.createElement("div");
@@ -158,63 +262,42 @@
                    "<p>" + m[1] + "</p><div class=\"mini\"><i></i></div>";
     capa.appendChild(el);
     if (capa.children.length > 14) capa.removeChild(capa.firstChild);
+    beep(880, 0.04, 0.2); // chasquido de cada ventana
   }
-  popup();
-  var iPopup = setInterval(popup, 380);
 
-  // Contador de amenazas y barra de progreso
-  var iContador = setInterval(function () {
-    amenazas += Math.floor(Math.random() * 7) + 2;
-    contador.textContent = amenazas;
-    progreso.style.width = Math.min(100, (Date.now() - inicio) / DURACION * 100) + "%";
-  }, 150);
-
-  // Sirena (los celulares suelen bloquear el sonido hasta que el usuario toca la pantalla)
-  var ctx = null, osc = null, iSirena = null;
-  function iniciarAudio() {
-    if (calmado) return;
-    try {
-      var AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return;
-      if (!ctx) ctx = new AC();
-      if (ctx.state === "suspended") ctx.resume();
-      if (osc) return;
-      osc = ctx.createOscillator();
-      var gain = ctx.createGain();
-      osc.type = "square";
-      gain.gain.value = 0.08;
-      osc.frequency.value = 880;
-      osc.connect(gain); gain.connect(ctx.destination);
-      osc.start();
-      var alto = true;
-      iSirena = setInterval(function () {
-        alto = !alto;
-        try { osc.frequency.setValueAtTime(alto ? 880 : 620, ctx.currentTime); } catch (e) {}
-      }, 300);
-    } catch (e) {}
+  /* ---------- Secuencia ---------- */
+  function iniciar() {
+    if (iniciado) return;
+    iniciado = true;
+    prepararAudio();
+    arrancarSirena();
+    vibrar();
+    iVibra = setInterval(vibrar, 1600);
+    document.body.classList.add("activo", "sacudir");
+    inicio = Date.now();
+    popup();
+    iPopup = setInterval(popup, 380);
+    iContador = setInterval(function () {
+      amenazas += Math.floor(Math.random() * 7) + 2;
+      contador.textContent = amenazas;
+      progreso.style.width = Math.min(100, (Date.now() - inicio) / DURACION * 100) + "%";
+    }, 150);
+    setTimeout(calmar, DURACION);
   }
-  function vibrar() {
-    try { if (navigator.vibrate) navigator.vibrate([300, 100, 300, 100, 300, 100, 300]); } catch (e) {}
-  }
-  function alTocar() { if (!calmado) { iniciarAudio(); vibrar(); } }
-
-  iniciarAudio();
-  vibrar();
-  document.addEventListener("pointerdown", alTocar, { passive: true });
-  document.addEventListener("touchstart", alTocar, { passive: true });
 
   // A los 10 segundos: todo se calma y queda un único mensaje
   function calmar() {
     calmado = true;
-    clearInterval(iPopup); clearInterval(iContador); clearInterval(iSirena);
+    clearInterval(iPopup); clearInterval(iContador); clearInterval(iVibra);
     try { if (navigator.vibrate) navigator.vibrate(0); } catch (e) {}
-    try { if (osc) osc.stop(); if (ctx) ctx.close(); } catch (e) {}
+    apagarAudio();
     document.body.classList.remove("sacudir");
     alarma.classList.add("fuera");
     document.body.classList.add("calma");
     setTimeout(function () { if (alarma.parentNode) alarma.parentNode.removeChild(alarma); }, 1400);
   }
-  setTimeout(calmar, DURACION);
+
+  document.getElementById("reclamar").addEventListener("click", iniciar);
 })();
 </script>
 </body>
